@@ -1,62 +1,65 @@
-importScripts("/epoxy/index.js");
-importScripts("/libcurl/index.js");
-importScripts("/transports/bareTransport.js");
 importScripts("/uv/uv.bundle.js");
 importScripts("/uv/uv.config.js");
+importScripts("/workerware/workerware.js");
 importScripts(__uv$config.sw || "/uv/uv.sw.js");
-importScripts("/dynamic/dynamic.config.js");
-importScripts("/dynamic/dynamic.worker.js");
-//import our IDB lib
-importScripts("/localforage/localforage.min.js");
-localforage.config({
-  driver: localforage.INDEXEDDB,
-  name: "Nebula",
-  version: 1.0,
-  storeName: "nebula_config",
-  description: "Nebula Config for things reliant on IndexedDB"
-});
-
 const uv = new UVServiceWorker();
-const dynPromise = new Promise(async (resolve) => {
-  try {
-    const bare =
-      (await localforage.getItem("bare")) || location.origin + "/bare/";
-    self.__dynamic$config.bare.path = bare;
-    self.dynamic = new Dynamic(self.__dynamic$config);
-  } catch (error) {
-    console.log(error);
-  }
-  resolve();
+const ww = new WorkerWare({ debug: false });
+
+//me when Firefox (thanks vk6)
+if (navigator.userAgent.includes("Firefox")) {
+    Object.defineProperty(globalThis, "crossOriginIsolated", {
+        value: true,
+        writable: true
+    });
+}
+
+//where we handle our plugins!!!
+self.addEventListener("message", function (event) {
+    console.log(event.data);
+    uv.config.inject = [];
+    //loop over the required data (we don't verify here as types will take care of us :D)
+    event.data.forEach((data) => {
+        if (data.remove) {
+            if (data.type === "page") {
+                const idx = uv.config.inject.indexOf(data.host);
+                uv.config.inject.splice(idx, 1);
+            } else if (data.type === "serviceWorker") {
+                ww.deleteByName(data.name);
+            }
+        } else {
+            if (data.type === "page") {
+                uv.config.inject.push({
+                    host: data.host,
+                    html: data.html,
+                    injectTo: data.injectTo
+                });
+            } else if (data.type === "serviceWorker") {
+                const wwFunction = eval(data.function);
+                ww.use({
+                    function: wwFunction ? wwFunction : new Function(data.function),
+                    name: data.name,
+                    events: data.events
+                });
+            } else {
+                console.error("NO type exists for that. Only serviceWorker & page exist.");
+                return;
+            }
+        }
+    });
 });
 
-self.addEventListener("fetch", (event) => {
-  if (
-    event.request.url.startsWith(location.origin + self.__dynamic$config.prefix)
-  ) {
+self.addEventListener("fetch", function (event) {
     event.respondWith(
-      (async function () {
-        try {
-          await dynPromise;
-        } catch (error) {}
-        if (await self.dynamic.route(event)) {
-          return await self.dynamic.fetch(event);
-        }
-        await fetch(event.request);
-      })()
+        (async () => {
+            const wwRes = await ww.run(event)();
+            if (wwRes.includes(null)) {
+                return;
+            }
+            if (event.request.url.startsWith(location.origin + __uv$config.prefix)) {
+                return await uv.fetch(event);
+            } else {
+                return await fetch(event.request);
+            }
+        })()
     );
-  } else if (
-    event.request.url.startsWith(location.origin + __uv$config.prefix)
-  ) {
-    event.respondWith(
-      (async function () {
-        return await uv.fetch(event);
-      })()
-    );
-  } else {
-    event.respondWith(
-      (async function () {
-        return await fetch(event.request);
-      })()
-    );
-  }
 });
